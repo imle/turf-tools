@@ -1,7 +1,7 @@
 import { Icon } from "~/components/icon";
 import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Outlet, useNavigate, useParams } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "~/components/button";
 import { Callout, DialogError } from "~/components/callout";
 import {
@@ -21,8 +21,8 @@ import {
 import { Input } from "~/components/input";
 import { Rail, useShowArchived } from "~/components/rail";
 import {
-  cleanSources,
   findImporter,
+  resolveImportSources,
   sourcesComplete,
   updateHint,
   type ImporterSpec,
@@ -245,10 +245,12 @@ function CreateDatasetDialog({
   takenNames: ReadonlyArray<string>;
   onCreated: (datasetId: string) => void;
 }) {
+  const { orgSlug } = Route.useParams();
   const { data: importers } = useSuspenseQuery(importersQuery());
   const [name, setName] = useState("");
   const [importerName, setImporterName] = useState<string | null>(null);
   const [sources, setSources] = useState<Record<string, string>>({});
+  const [files, setFiles] = useState<Record<string, File | null>>({});
   // Optional fixed slice, like type: a field of the selected importer plus the
   // values to keep, as the file's own codes in comma-separated text, parsed on
   // submit.
@@ -264,6 +266,7 @@ function CreateDatasetDialog({
       setName("");
       setImporterName(null);
       setSources({});
+      setFiles({});
       setFilterColumn(null);
       setFilterText("");
       setError(null);
@@ -278,6 +281,7 @@ function CreateDatasetDialog({
       setError(null);
       setImporterName(next);
       setSources({});
+      setFiles({});
       setFilterColumn(null);
       setFilterText("");
     },
@@ -297,13 +301,15 @@ function CreateDatasetDialog({
       : null;
 
   const create = useMutation({
-    mutationFn: () =>
-      client.datasets.create({
+    mutationFn: async () => {
+      const resolved = await resolveImportSources(orgSlug, importer!, sources, files);
+      return client.datasets.create({
         name: name.trim(),
         importer: importerName!,
-        sources: cleanSources(sources),
+        sources: resolved,
         importFilter,
-      }),
+      });
+    },
     onSuccess: (res) => {
       onCreated(res.datasetId);
       onOpenChange(false);
@@ -320,7 +326,7 @@ function CreateDatasetDialog({
   const valid =
     name.trim().length > 0 &&
     importer != null &&
-    sourcesComplete(importer, sources, null) &&
+    sourcesComplete(importer, sources, null, files) &&
     (filterField == null || importFilter != null);
 
   return (
@@ -344,7 +350,7 @@ function CreateDatasetDialog({
           className="flex flex-col gap-4"
         >
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm text-muted-foreground">Name</label>
+            <label className="text-sm font-medium">Name</label>
             <Input
               autoFocus
               value={name}
@@ -364,7 +370,7 @@ function CreateDatasetDialog({
             ) : null}
           </div>
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm text-muted-foreground">Type</label>
+            <label className="text-sm font-medium">Type</label>
             <DropdownMenu {...typeDropdown.menu}>
               <DropdownMenuTrigger
                 disabled={pending}
@@ -392,15 +398,20 @@ function CreateDatasetDialog({
               <SourceInputs
                 importer={importer}
                 sources={sources}
-                onChange={(next) => {
+                files={files}
+                onSourcesChange={(next) => {
                   setError(null);
                   setSources(next);
+                }}
+                onFilesChange={(next) => {
+                  setError(null);
+                  setFiles(next);
                 }}
                 disabled={pending}
               />
               {importer.filters.length > 0 ? (
                 <div className="flex flex-col gap-1.5">
-                  <label className="text-sm text-muted-foreground">Filter</label>
+                  <label className="text-sm font-medium">Filter</label>
                   <div className="flex flex-wrap gap-1.5">
                     {[{ column: null, label: "None" }, ...importer.filters].map((f) => {
                       const sel = filterColumn === f.column;
@@ -453,44 +464,102 @@ function CreateDatasetDialog({
 }
 
 // One input per file the importer reads. Shared by create and the dataset
-// page's update, where the importer is fixed.
+// page's update, where the importer is fixed. Each source accepts either a
+// picked file (uploaded on submit) or a pasted http(s) link / data-server path.
 // `base` is the version an Update builds on (null on a first import), which
 // lets a source it keeps or adds to stay blank.
 export function SourceInputs({
   importer,
   sources,
-  onChange,
+  files,
+  onSourcesChange,
+  onFilesChange,
   disabled,
   autoFocus,
   base = null,
 }: {
   importer: ImporterSpec;
   sources: Record<string, string>;
-  onChange: (sources: Record<string, string>) => void;
+  files: Record<string, File | null>;
+  onSourcesChange: (sources: Record<string, string>) => void;
+  onFilesChange: (files: Record<string, File | null>) => void;
   disabled: boolean;
   autoFocus?: boolean;
   base?: number | null;
 }) {
-  return importer.sources.map((source, i) => (
-    <div key={source.key} className="flex flex-col gap-1.5">
-      <label className="text-sm text-muted-foreground">
-        {source.label}
-        {source.required && updateHint(source, base) == null ? null : (
-          <span className="text-muted-foreground"> (optional)</span>
-        )}
-      </label>
-      <Input
-        autoFocus={autoFocus && i === 0}
-        value={sources[source.key] ?? ""}
-        onChange={(e) => onChange({ ...sources, [source.key]: e.target.value })}
-        placeholder="https://..."
-        disabled={disabled}
+  return importer.sources.map((source, i) => {
+    const file = files[source.key] ?? null;
+    const hint = updateHint(source, base);
+    return (
+      <div key={source.key} className="flex flex-col gap-1.5">
+        <label className="text-sm font-medium">
+          {source.label}
+          {source.required && hint == null ? null : (
+            <span className="text-muted-foreground"> (optional)</span>
+          )}
+        </label>
+        <div className="flex flex-col gap-1.5">
+          <SourceFileButton
+            file={file}
+            disabled={disabled}
+            autoFocus={autoFocus && i === 0 && !file}
+            onPick={(next) => {
+              onFilesChange({ ...files, [source.key]: next });
+              if (next) onSourcesChange({ ...sources, [source.key]: "" });
+            }}
+          />
+          <Input
+            value={sources[source.key] ?? ""}
+            onChange={(e) => {
+              onSourcesChange({ ...sources, [source.key]: e.target.value });
+              if (file) onFilesChange({ ...files, [source.key]: null });
+            }}
+            placeholder="or paste an https:// link..."
+            disabled={disabled}
+          />
+        </div>
+        <span className="text-sm text-muted-foreground italic">
+          {hint ? `${source.description}, ${hint}.` : source.description}
+        </span>
+      </div>
+    );
+  });
+}
+
+function SourceFileButton({
+  file,
+  disabled,
+  autoFocus,
+  onPick,
+}: {
+  file: File | null;
+  disabled: boolean;
+  autoFocus?: boolean;
+  onPick: (file: File | null) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        className="hidden"
+        onChange={(e) => {
+          onPick(e.target.files?.[0] ?? null);
+          e.target.value = "";
+        }}
       />
-      <span className="text-sm text-muted-foreground italic">
-        {updateHint(source, base)
-          ? `${source.description}, ${updateHint(source, base)}.`
-          : source.description}
-      </span>
-    </div>
-  ));
+      <Button
+        type="button"
+        variant="outline"
+        className="justify-start disabled:opacity-100"
+        disabled={disabled}
+        autoFocus={autoFocus}
+        onClick={() => inputRef.current?.click()}
+      >
+        <Icon name="upload" className="size-3.5 shrink-0" />
+        <span className="truncate">{file ? file.name : "Choose a file..."}</span>
+      </Button>
+    </>
+  );
 }

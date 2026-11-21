@@ -37,12 +37,12 @@ class FlVoterFileImporter:
         SourceSpec(
             key="detail",
             label="Voter detail",
-            description="URL of a .zip file",
+            description="Upload or URL of a .zip file",
         ),
         SourceSpec(
             key="history",
             label="Voter history",
-            description="URL of a .zip file",
+            description="Upload or URL of a .zip file",
             required=False,
         ),
     )

@@ -54,7 +54,7 @@ class GaVoterFileImporter:
         SourceSpec(
             key="file",
             label="Voter file",
-            description="URL of a .csv or .parquet file",
+            description="Upload or URL of a .csv or .parquet file",
             on_update="keep",
             table="persons_raw",
         ),

@@ -42,10 +42,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "~
 import { formatDateTime, formatDuration } from "~/lib/format";
 import {
   builtOnLabel,
-  cleanSources,
   findImporter,
   importerLabel,
   importFilterLabel,
+  resolveImportSources,
+  sourceDisplay,
   sourcesComplete,
   updateBase,
 } from "~/lib/importers";
@@ -649,7 +650,8 @@ function DetailsDialog({
               {sources.map(([key, value], i) => (
                 <span key={key}>
                   {i === 0 ? null : i === sources.length - 1 ? " and " : ", "}
-                  {value} (“{importer?.sources.find((s) => s.key === key)?.label ?? key}”)
+                  {sourceDisplay(value)} (“
+                  {importer?.sources.find((s) => s.key === key)?.label ?? key}”)
                 </span>
               ))}
               .
@@ -1043,11 +1045,13 @@ function UpdateDialog({
   hasReadyVersion: boolean;
   onUpdated: () => void;
 }) {
+  const { orgSlug } = Route.useParams();
   const { data: importers } = useSuspenseQuery(importersQuery());
   const spec = findImporter(importers, importer);
   const base = updateBase(spec, versions);
   const filterLabel = importFilterLabel(spec, importFilter);
   const [sources, setSources] = useState<Record<string, string>>({});
+  const [files, setFiles] = useState<Record<string, File | null>>({});
   const [error, setError] = useState<string | null>(null);
 
   const [wasOpen, setWasOpen] = useState(open);
@@ -1055,12 +1059,16 @@ function UpdateDialog({
     setWasOpen(open);
     if (open) {
       setSources({});
+      setFiles({});
       setError(null);
     }
   }
 
   const update = useMutation({
-    mutationFn: () => client.datasets.update({ datasetId, sources: cleanSources(sources) }),
+    mutationFn: async () => {
+      const resolved = await resolveImportSources(orgSlug, spec!, sources, files);
+      return client.datasets.update({ datasetId, sources: resolved });
+    },
     onSuccess: () => {
       onUpdated();
       onOpenChange(false);
@@ -1069,7 +1077,7 @@ function UpdateDialog({
   });
 
   const pending = update.isPending;
-  const valid = spec != null && sourcesComplete(spec, sources, base);
+  const valid = spec != null && sourcesComplete(spec, sources, base, files);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1103,9 +1111,14 @@ function UpdateDialog({
             <SourceInputs
               importer={spec}
               sources={sources}
-              onChange={(next) => {
+              files={files}
+              onSourcesChange={(next) => {
                 setError(null);
                 setSources(next);
+              }}
+              onFilesChange={(next) => {
+                setError(null);
+                setFiles(next);
               }}
               disabled={pending}
               autoFocus

@@ -3,6 +3,7 @@ import {
   builtOnLabel,
   type ImporterSpec,
   isReadableSource,
+  sourceDisplay,
   sourcesComplete,
   updateBase,
   updateHint,
@@ -55,6 +56,14 @@ test("a kept source may stay blank only on an update, and something must be supp
   expect(sourcesComplete(florida, { history: "h.zip" }, 2)).toBe(false);
 });
 
+test("a picked file counts as a supplied source", () => {
+  expect(sourcesComplete(georgia, {}, null, { file: new File(["x"], "a.csv") })).toBe(true);
+  expect(sourcesComplete(georgia, {}, null, {})).toBe(false);
+  expect(
+    sourcesComplete(florida, { history: "h.zip" }, 2, { file: new File(["x"], "a.zip") }),
+  ).toBe(true);
+});
+
 test("a version built on another says what it took from it", () => {
   expect(builtOnLabel(georgia, { history: "h.csv" }, 3)).toBe(
     "Voter file from v3 unchanged and voter history from v3 with additions.",
@@ -74,4 +83,11 @@ test("update hints name the base version", () => {
   expect(updateHint(georgia.sources[1]!, 3)).toBe("adds to voter history from v3");
   expect(updateHint(georgia.sources[1]!, null)).toBe(null);
   expect(updateHint(florida.sources[1]!, 3)).toBe(null);
+});
+
+test("sourceDisplay shows the basename for local uploads", () => {
+  expect(sourceDisplay("/app/import_uploads/abc/voters.csv")).toBe("voters.csv");
+  expect(sourceDisplay("https://example.com/path/voters.csv")).toBe(
+    "https://example.com/path/voters.csv",
+  );
 });

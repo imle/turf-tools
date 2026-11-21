@@ -70,7 +70,7 @@ class NysVoterFileImporter:
         SourceSpec(
             key="file",
             label="Voter file",
-            description="URL of a .txt, .csv, or .parquet file",
+            description="Upload or URL of a .txt, .csv, or .parquet file",
         ),
     )
     # Geographic slices worth fixing a dataset to. Election district is left

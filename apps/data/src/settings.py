@@ -107,6 +107,10 @@ class Settings(BaseSettings):
         default="./osm_cache",
         description="Local directory to cache downloaded OSM PBFs.",
     )
+    import_uploads_dir: str = Field(
+        default="./import_uploads",
+        description="Directory for voter-file uploads staged by POST /import-uploads.",
+    )
 
     quickwit_batch_size: int = Field(
         default=1_000_000,

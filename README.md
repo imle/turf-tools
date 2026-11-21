@@ -90,7 +90,7 @@ The `dev:ios` command is required to build and connect to the native app for iOS
 
 ## Importing voter data
 
-Voter files or other sources of voter data are imported through the admin UI, in development as well as production. When importing a dataset you specify its source as a URL, an `s3://` path, or a local path on the machine running the data service (relative paths resolve from `apps/data`). The import geocodes the file, builds its boundaries, and indexes it for search. A first import on a fresh machine also downloads TIGER and OSM reference data, which takes extra time depending on download speeds.
+Voter files or other sources of voter data are imported through the admin UI, in development as well as production. When importing a dataset you can upload a file or paste an http(s) URL (a local path on the machine running the data service also works; relative paths resolve from `apps/data`). The import geocodes the file, builds its boundaries, and indexes it for search. A first import on a fresh machine also downloads TIGER and OSM reference data, which takes extra time depending on download speeds.
 
 ## Testing
 

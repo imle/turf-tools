@@ -47,7 +47,7 @@ export function checkImportInputs(
   const unreadable = importer.sources.filter((s) => !isReadableSource(cleaned[s.key] ?? ""));
   if (unreadable.length > 0)
     throw new ORPCError("BAD_REQUEST", {
-      message: `${unreadable.map((s) => s.label).join(", ")} must be an http:// or https:// link.`,
+      message: `${unreadable.map((s) => s.label).join(", ")} must be an http(s) link or a path on the data server.`,
     });
   if (filter && !importer.filters.some((f) => f.column === filter.column))
     throw new ORPCError("BAD_REQUEST", {

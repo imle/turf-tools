@@ -61,19 +61,69 @@ export function isReadableSource(source: string): boolean {
 
 // Whether the sources can be imported. `base` is the version an Update builds
 // on (null on a first import), which lets `keep` and `add` sources stay blank;
-// at least one source must be supplied either way.
+// a picked file counts as supplied. At least one source must be supplied either
+// way.
 export function sourcesComplete(
   importer: ImporterSpec,
   sources: Record<string, string>,
   base: number | null,
+  files: Record<string, File | null> = {},
 ): boolean {
-  const supplied = (s: ImporterSource) => (sources[s.key] ?? "").trim().length > 0;
+  const supplied = (s: ImporterSource) =>
+    files[s.key] != null || (sources[s.key] ?? "").trim().length > 0;
   return (
     importer.sources.some(supplied) &&
     importer.sources.every(
       (s) => !s.required || supplied(s) || (base != null && s.onUpdate !== "replace"),
     )
   );
+}
+
+// Upload any picked files to the data service, then merge with pasted URLs.
+// Returns the source map the create/update RPCs expect (paths and links).
+export async function resolveImportSources(
+  orgSlug: string,
+  importer: ImporterSpec,
+  sources: Record<string, string>,
+  files: Record<string, File | null>,
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const spec of importer.sources) {
+    const file = files[spec.key];
+    if (file) {
+      out[spec.key] = await uploadImportSource(orgSlug, file);
+      continue;
+    }
+    const value = (sources[spec.key] ?? "").trim();
+    if (value) out[spec.key] = value;
+  }
+  return out;
+}
+
+async function uploadImportSource(orgSlug: string, file: File): Promise<string> {
+  const params = new URLSearchParams({ filename: file.name });
+  const res = await fetch(`/api/web/${encodeURIComponent(orgSlug)}/import-upload?${params}`, {
+    method: "POST",
+    body: file,
+    headers: { "Content-Type": "application/octet-stream" },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Upload failed (${res.status})`);
+  }
+  const json = (await res.json()) as { path?: string };
+  if (!json.path) throw new Error("Upload failed: no path returned.");
+  return json.path;
+}
+
+// Display form for a stored source: basename for local uploads, otherwise the
+// raw string (URL or typed path).
+export function sourceDisplay(source: string): string {
+  const trimmed = source.trim();
+  if (!trimmed) return trimmed;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return trimmed;
+  const parts = trimmed.split(/[/\\]/);
+  return parts[parts.length - 1] || trimmed;
 }
 
 // The version an Update builds on: the latest ready, unarchived one, when the

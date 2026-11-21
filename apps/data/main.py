@@ -3,10 +3,13 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
@@ -52,6 +55,7 @@ from src.duckdb import (
     s3_secret_expires,
 )
 from src.import_job import fail_interrupted_versions, import_dataset_version
+from src.import_uploads import MAX_IMPORT_UPLOAD_BYTES, ImportUploadError
 from src.importers.registry import importer_specs
 from src.job_runner import JobManager
 from src.publish_turfs import PublishTurfsRequest, publish_turfs
@@ -358,6 +362,49 @@ async def custom_fields_inspect(request: Request):
         finally:
             conn.close()
     return {"columns": columns}
+
+
+@app.post("/import-uploads")
+async def import_uploads(request: Request, filename: str = Query(...)):
+    """Stage a voter-file upload for a later import. Raw body in, absolute path
+    out — the web edge authenticates and the import job reads the path as a
+    normal local source. Each upload lands in its own UUID directory under
+    `import_uploads_dir` so filenames never collide.
+
+    Streams to disk as chunks arrive (statewide extracts can be large). The
+    sync `stage_import_upload` helper covers the same rules for tests.
+    """
+    safe_name = Path(filename).name
+    if not safe_name or safe_name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    root = Path(settings.import_uploads_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    dest_dir = root / uuid.uuid4().hex
+    dest_dir.mkdir()
+    dest = dest_dir / safe_name
+
+    written = 0
+    try:
+        with dest.open("wb") as out:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > MAX_IMPORT_UPLOAD_BYTES:
+                    raise ImportUploadError("File is too large to upload.")
+                out.write(chunk)
+    except ImportUploadError as exc:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        status = 413 if "too large" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except Exception:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise
+
+    if written == 0:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="Empty upload.")
+
+    return {"path": str(dest), "filename": safe_name, "bytes": written}
 
 
 @app.post("/custom-fields/append")
