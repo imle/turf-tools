@@ -762,6 +762,61 @@ export function Map({
     };
   }, [mapReady, onViewportChange]);
 
+  // Middle-mouse drag to pan. MapLibre's dragPan only accepts the left
+  // button; editors that bind left-click (turf cutter, zone paint) need
+  // another pan gesture. Document capture so it still works when an SVG
+  // overlay (vertex handles) is the event target.
+  useEffect(() => {
+    if (!mapReady) return;
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    const canvas = map.getCanvas();
+    let last: [number, number] | null = null;
+
+    const overCanvas = (e: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      return (
+        e.clientX >= rect.left &&
+        e.clientY >= rect.top &&
+        e.clientX <= rect.right &&
+        e.clientY <= rect.bottom
+      );
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 1 || !overCanvas(e)) return;
+      // Blocks the browser's autoscroll affordance on middle-click.
+      e.preventDefault();
+      e.stopPropagation();
+      last = [e.clientX, e.clientY];
+      document.body.style.cursor = "grabbing";
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!last) return;
+      const dx = e.clientX - last[0];
+      const dy = e.clientY - last[1];
+      last = [e.clientX, e.clientY];
+      map.panBy([-dx, -dy], { animate: false });
+    };
+    const endDrag = () => {
+      if (!last) return;
+      last = null;
+      document.body.style.cursor = "";
+    };
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("pointerup", endDrag, true);
+    document.addEventListener("pointercancel", endDrag, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointermove", onPointerMove, true);
+      document.removeEventListener("pointerup", endDrag, true);
+      document.removeEventListener("pointercancel", endDrag, true);
+      if (last) document.body.style.cursor = "";
+    };
+  }, [mapReady]);
+
   if (!isMaptilerKeyConfigured()) {
     return (
       <div
