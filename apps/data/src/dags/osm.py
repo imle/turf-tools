@@ -21,6 +21,7 @@ it has one. `src/osm_lookup.py` is how geocoding picks a voter's record.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -167,7 +168,8 @@ def osm_pbfs(
             size_mb = pbf_path.stat().st_size / (1024 * 1024)
             print(f"OSM PBF: {filename} ({size_mb:.1f} MB, cached)")
             continue
-        url = f"{GEOFABRIK_US_URL}/{filename}"
+        # Geofabrik serves each US state under …/us/<region>/<file>.
+        url = f"{GEOFABRIK_US_URL}/{region}/{filename}"
         print(f"Downloading OSM PBF: {url}")
         # Download beside the target and rename, so an interrupted download
         # never looks cached.
@@ -190,17 +192,84 @@ def osm_pbfs(
 # Node 2 – building polygons (via osmium-tool)
 # ---------------------------------------------------------------------------
 
+OSMIUM_IMAGE = "turf-tools-osmium"
 
-def _require_osmium() -> str:
-    """Locate osmium-tool on PATH or fail with an install hint."""
-    osmium = shutil.which("osmium")
-    if osmium is None:
+
+def _repo_root() -> Path:
+    # apps/data/src/dags/osm.py → repo root is parents[4]
+    return Path(__file__).resolve().parents[4]
+
+
+def _ensure_osmium_image() -> None:
+    """Build the dev osmium image if it is not already present."""
+    inspect = subprocess.run(
+        ["docker", "image", "inspect", OSMIUM_IMAGE],
+        capture_output=True,
+        check=False,
+    )
+    if inspect.returncode == 0:
+        return
+    compose = _repo_root() / "docker-compose.dev.yml"
+    print(f"Building {OSMIUM_IMAGE} (first OSM extract)…")
+    subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(compose),
+            "--profile",
+            "tools",
+            "build",
+            "osmium",
+        ],
+        check=True,
+    )
+
+
+def _osmium_cmd(*paths: Path) -> list[str]:
+    """Return an argv prefix that runs osmium-tool.
+
+    Prefers a host `osmium` binary. Falls back to `docker run` against the
+    `turf-tools-osmium` image, bind-mounting the shared parent of ``paths``
+    at the same absolute path so the caller's file args need no rewriting.
+    """
+    native = shutil.which("osmium")
+    if native is not None:
+        return [native]
+
+    if shutil.which("docker") is None:
         raise RuntimeError(
-            "osmium-tool not found on PATH. Install:\n"
+            "osmium-tool not found on PATH, and docker is unavailable.\n"
+            "Install one of:\n"
             "  macOS:  brew install osmium-tool\n"
-            "  Debian: apt install osmium-tool"
+            "  Debian: apt install osmium-tool\n"
+            "  Or start Docker Desktop (dev falls back to a container)."
         )
-    return osmium
+
+    if not paths:
+        raise ValueError("_osmium_cmd requires at least one path to mount")
+
+    roots = {p.resolve().parent for p in paths}
+    if len(roots) != 1:
+        raise ValueError(f"osmium paths must share one parent directory: {roots}")
+    root = next(iter(roots))
+
+    _ensure_osmium_image()
+
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{root}:{root}",
+        "-w",
+        str(root),
+    ]
+    # Match the host user so written cache files are not root-owned on Linux.
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+    cmd.append(OSMIUM_IMAGE)
+    return cmd
 
 
 def osm_buildings_polygons(
@@ -242,8 +311,6 @@ def osm_buildings_polygons(
         geojson_path = osm_pbf.with_name(f"{osm_pbf.stem}-buildings.geojsonseq")
         config_path = osm_pbf.with_name("osmium-export-buildings.json")
 
-        osmium = _require_osmium()
-
         # osmium-export config (https://docs.osmcode.org/osmium/latest/osmium-export.html):
         #   - emit @id and @type as the only attributes
         #   - linear_tags=false: skip linestrings entirely
@@ -263,33 +330,48 @@ def osm_buildings_polygons(
             )
         )
 
-        if not filtered_pbf.exists():
-            print(f"Filtering buildings from {osm_pbf.name}…")
-            subprocess.run(
-                [osmium, "tags-filter", str(osm_pbf), "wr/building", "-o", str(filtered_pbf)],
-                check=True,
-            )
-            size_mb = filtered_pbf.stat().st_size / (1024 * 1024)
-            print(f"  done ({size_mb:.1f} MB)")
+        if not filtered_pbf.exists() or not geojson_path.exists():
+            # Absolute paths match `_osmium_cmd`'s same-path Docker bind-mount.
+            osm_pbf_abs = osm_pbf.resolve()
+            filtered_pbf_abs = filtered_pbf.resolve()
+            geojson_path_abs = geojson_path.resolve()
+            config_path_abs = config_path.resolve()
+            osmium = _osmium_cmd(osm_pbf_abs, filtered_pbf_abs, geojson_path_abs, config_path_abs)
 
-        if not geojson_path.exists():
-            print("Exporting building polygons to GeoJSONSeq…")
-            subprocess.run(
-                [
-                    osmium,
-                    "export",
-                    str(filtered_pbf),
-                    "-c",
-                    str(config_path),
-                    "-f",
-                    "geojsonseq",
-                    "-o",
-                    str(geojson_path),
-                ],
-                check=True,
-            )
-            size_mb = geojson_path.stat().st_size / (1024 * 1024)
-            print(f"  done ({size_mb:.1f} MB)")
+            if not filtered_pbf.exists():
+                print(f"Filtering buildings from {osm_pbf.name}…")
+                subprocess.run(
+                    [
+                        *osmium,
+                        "tags-filter",
+                        str(osm_pbf_abs),
+                        "wr/building",
+                        "-o",
+                        str(filtered_pbf_abs),
+                    ],
+                    check=True,
+                )
+                size_mb = filtered_pbf.stat().st_size / (1024 * 1024)
+                print(f"  done ({size_mb:.1f} MB)")
+
+            if not geojson_path.exists():
+                print("Exporting building polygons to GeoJSONSeq…")
+                subprocess.run(
+                    [
+                        *osmium,
+                        "export",
+                        str(filtered_pbf_abs),
+                        "-c",
+                        str(config_path_abs),
+                        "-f",
+                        "geojsonseq",
+                        "-o",
+                        str(geojson_path_abs),
+                    ],
+                    check=True,
+                )
+                size_mb = geojson_path.stat().st_size / (1024 * 1024)
+                print(f"  done ({size_mb:.1f} MB)")
         else:
             size_mb = geojson_path.stat().st_size / (1024 * 1024)
             print(f"Building GeoJSONSeq: {geojson_path.name} ({size_mb:.1f} MB, cached)")

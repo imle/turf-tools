@@ -16,10 +16,9 @@ You'll need to have these installed to run the development environment.
 
 - [Node.js](https://nodejs.org/) >= 22.12
 - [pnpm](https://pnpm.io/) enabled via `corepack enable`
-- [Docker](https://www.docker.com/) (for the development Postgres)
+- [Docker](https://www.docker.com/) (for Quickwit via `pnpm dev:search`, optional Compose Postgres, and osmium-tool when it is not installed on the host)
 - [uv](https://docs.astral.sh/uv/) `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- [Quickwit](https://quickwit.io/) `curl -L https://install.quickwit.io | sh` (move binary to `/usr/local/bin/`)
-- [osmium-tool](https://osmcode.org/osmium-tool/) (for OSM geocoding)
+- [osmium-tool](https://osmcode.org/osmium-tool/) (optional — used for OSM geocoding; without it the data service runs osmium in Docker)
 - [Xcode](https://developer.apple.com/xcode/) (optional, for iOS simulator)
 
 ## Setup
@@ -71,7 +70,7 @@ This starts:
 - `web` — TanStack Start admin UI and oRPC API (port 3000)
 - `native` — Expo web preview of the mobile app (port 8081)
 - `data` — FastAPI data service (including DuckDB/DuckLake) (port 8000)
-- `search` — Quickwit search engine (port 7280)
+- `search` — Quickwit search engine in Docker (port 7280)
 
 The first time you run `dev`, the web server automatically pushes the Drizzle schema and seeds reference tables plus two dev organizations, an admin user, and sample scripts once Postgres is up. It seeds no voter data.
 

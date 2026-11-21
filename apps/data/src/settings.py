@@ -122,7 +122,11 @@ class Settings(BaseSettings):
     )
     quickwit_binary: str = Field(
         default="quickwit",
-        description="Path to the Quickwit CLI binary used for `tool local-ingest`.",
+        description=(
+            "Path to the Quickwit CLI binary used for `tool local-ingest`. "
+            "When unset/`quickwit` and not on PATH, ingest uses Docker "
+            "(same image as `pnpm dev:search`)."
+        ),
     )
     quickwit_config_path: str = Field(
         default="quickwit/node.yaml",

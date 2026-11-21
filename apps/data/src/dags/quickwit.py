@@ -10,9 +10,13 @@ machine.
 from __future__ import annotations
 
 import math
+import os
+import shutil
 import subprocess
 import tempfile
 import time
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import duckdb  # noqa: TC001  # Hamilton resolves annotations at runtime via typing.get_type_hints
 from src.importers.base import Manifest  # noqa: TC001  # runtime annotation for Hamilton
@@ -33,6 +37,9 @@ _REQUIRED_COLUMNS = [
     "zip5",
     "zip4",
 ]
+
+# Same image as docker-compose.dev.yml's `quickwit` service.
+_QUICKWIT_IMAGE = os.environ.get("QUICKWIT_IMAGE", "quickwit/quickwit:v0.9.3")
 
 
 # The Lookup list is sorted A→Z by name, but Quickwit 0.8.2 can't sort on a text
@@ -74,12 +81,133 @@ def quickwit_document_count(
 _PIPE_ROWS = 10_000
 
 
+def _metastore_uri(*, for_docker: bool) -> str:
+    """Postgres metastore URI for Quickwit — same DB as `pnpm db:quickwit`.
+
+    Prefer ``QW_METASTORE_URI``. Otherwise derive from ``DATABASE_URL`` (same
+    credentials, database name ``quickwit``). Docker runs rewrite the host to
+    ``host.docker.internal`` so the container reaches host Postgres.
+    """
+    explicit = os.environ.get("QW_METASTORE_URI")
+    if explicit:
+        parsed = urlparse(explicit)
+    else:
+        database_url = os.environ.get(
+            "DATABASE_URL",
+            "postgres://postgres:postgres@127.0.0.1:5432/postgres",
+        )
+        parsed = urlparse(database_url)._replace(path="/quickwit", query="", fragment="")
+
+    host = "host.docker.internal" if for_docker else (parsed.hostname or "127.0.0.1")
+    port = parsed.port or 5432
+    if parsed.username is not None:
+        auth = parsed.username if parsed.password is None else f"{parsed.username}:{parsed.password}"
+        netloc = f"{auth}@{host}:{port}"
+    else:
+        netloc = f"{host}:{port}"
+    return urlunparse(parsed._replace(netloc=netloc, path="/quickwit", query="", fragment=""))
+
+
+def _resolve_binary(quickwit_binary_path: str) -> str | None:
+    """Return an absolute/PATH binary, or None when Docker should be used."""
+    if quickwit_binary_path != "quickwit":
+        path = Path(quickwit_binary_path)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        found = shutil.which(quickwit_binary_path)
+        if found is not None:
+            return found
+        return None
+    return shutil.which("quickwit")
+
+
+def _local_ingest_command(
+    quickwit_binary_path: str,
+    quickwit_config_path: str,
+    quickwit_index_id: str,
+) -> tuple[list[str], dict[str, str]]:
+    """Build argv + env for ``tool local-ingest``.
+
+    Prefers a host Quickwit binary. Falls back to ``docker run`` against the
+    same image as ``pnpm dev:search``, bind-mounting ``qwdata`` and the node
+    config so ingest and the searcher share splits + metastore.
+    """
+    tool_args = [
+        "tool",
+        "local-ingest",
+        "--config",
+        quickwit_config_path,
+        "--index",
+        quickwit_index_id,
+        "--yes",
+        "--no-color",
+    ]
+    env = {
+        **os.environ,
+        "QW_METASTORE_URI": _metastore_uri(for_docker=False),
+        "QW_DISABLE_TELEMETRY": "1",
+    }
+
+    native = _resolve_binary(quickwit_binary_path)
+    if native is not None:
+        return [native, *tool_args], env
+
+    if shutil.which("docker") is None:
+        raise RuntimeError(
+            "quickwit not found on PATH, and docker is unavailable.\n"
+            "Start Docker Desktop — `pnpm dev:search` and local-ingest use "
+            "quickwit/quickwit:v0.9.3 — or install a host binary."
+        )
+
+    config_path = Path(quickwit_config_path).resolve()
+    # node.yaml defaults data_dir to `qwdata` relative to the process cwd
+    # (apps/data when the data service runs). Keep that layout for the mount.
+    data_dir = Path(os.environ.get("QW_DATA_DIR", "qwdata")).resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    container_config = "/quickwit/config/node.yaml"
+
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--add-host=host.docker.internal:host-gateway",
+        "-v",
+        f"{data_dir}:/qwdata",
+        "-v",
+        f"{config_path}:{container_config}:ro",
+        "-e",
+        f"QW_METASTORE_URI={_metastore_uri(for_docker=True)}",
+        "-e",
+        "QW_DATA_DIR=/qwdata",
+        "-e",
+        "QW_DISABLE_TELEMETRY=1",
+    ]
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+    cmd.extend(
+        [
+            _QUICKWIT_IMAGE,
+            "tool",
+            "local-ingest",
+            "--config",
+            container_config,
+            "--index",
+            quickwit_index_id,
+            "--yes",
+            "--no-color",
+        ]
+    )
+    return cmd, env
+
+
 def _ingest_batch(
     command: list[str],
     rows: list[tuple],
     cursor: duckdb.DuckDBPyConnection,
     batch_size: int,
     label: str,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, float]]:
     """Pipe up to `batch_size` rows, `rows` first and then the cursor's, into one
     `local-ingest` run. Returns the rows sent and the time spent reading rows,
@@ -89,7 +217,13 @@ def _ingest_batch(
     timings = {"read": 0.0, "pipe": 0.0, "finish": 0.0}
     sent = 0
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err)  # noqa: S603
+        proc = subprocess.Popen(  # noqa: S603
+            command,
+            stdin=subprocess.PIPE,
+            stdout=out,
+            stderr=err,
+            env=env,
+        )
         assert proc.stdin is not None
         try:
             while rows:
@@ -189,17 +323,11 @@ def quickwit_local_ingest_result(
         ORDER BY external_id
     """
 
-    command = [
+    command, ingest_env = _local_ingest_command(
         quickwit_binary_path,
-        "tool",
-        "local-ingest",
-        "--config",
         quickwit_config_path,
-        "--index",
         quickwit_index_id,
-        "--yes",
-        "--no-color",
-    ]
+    )
     cursor = conn.execute(query)
     rows = cursor.fetchmany(min(_PIPE_ROWS, quickwit_batch_size))
     while rows:
@@ -214,7 +342,14 @@ def quickwit_local_ingest_result(
             flush=True,
         )
         batch_start = time.perf_counter()
-        sent, timings = _ingest_batch(command, rows, cursor, quickwit_batch_size, f"{batch_count}/{total_batches}")
+        sent, timings = _ingest_batch(
+            command,
+            rows,
+            cursor,
+            quickwit_batch_size,
+            f"{batch_count}/{total_batches}",
+            env=ingest_env,
+        )
         indexed_doc_count += sent
         rows = cursor.fetchmany(min(_PIPE_ROWS, quickwit_batch_size))
         print(
