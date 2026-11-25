@@ -1,11 +1,12 @@
 import { betterAuth } from "better-auth";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { emailOTP } from "better-auth/plugins";
+import { emailOTP, genericOAuth, keycloak } from "better-auth/plugins";
 import { tanstackStartCookies } from "better-auth/tanstack-start";
 import nodemailer, { type Transporter } from "nodemailer";
 import { and, db, eq, isNull } from "@turf-tools/db";
 import { accounts, memberships, sessions, users, verifications } from "@turf-tools/db/schema";
+import { isEmailOtpEnabled, isKeycloakEnabled } from "./auth-env";
 import { normalizeEmail } from "./normalize-email";
 
 // Resolved lazily so dev can boot without SMTP config; the login URL +
@@ -137,50 +138,54 @@ export const auth = betterAuth({
     }),
   },
   plugins: [
-    emailOTP({
-      disableSignUp: true,
-      expiresIn: 60 * 60,
-      // 8 digits rather than the 6-digit default — no human types it (it only
-      // rides in the verify-link URL), so the extra brute-force margin is free.
-      otpLength: 8,
-      // The OTP rides only in the verify-page URL; that page verifies via a
-      // client POST (never a GET), so scanners that pre-fetch the link can't
-      // burn it. Deployments behind JS-executing scanners set
-      // AUTH_REQUIRE_LINK_CONFIRMATION so the verify fires on a click rather
-      // than on mount — see routes/auth.email.$email.$code.tsx.
-      sendVerificationOTP: async ({ email, otp, type }) => {
-        // We only use the sign-in flow; other types (email-verification,
-        // forget-password, change-email) aren't wired up.
-        if (type !== "sign-in") return;
-        // The before-hook has already canonicalised `email` and confirmed
-        // an active membership exists. This lookup is just to grab the
-        // displayEmail for the outbound `to`.
-        const row = (
-          await db
-            .select({ displayEmail: users.displayEmail })
-            .from(users)
-            .where(eq(users.email, email))
-            .limit(1)
-        )[0];
-        if (!row) {
-          // Unreachable per the before-hook guarantee. Log loudly if it fires.
-          console.error(`[auth] sendVerificationOTP: no user row for ${email}`);
-          return;
-        }
-        const to = row.displayEmail;
-        const baseUrl = process.env.BETTER_AUTH_URL ?? "http://localhost:3000";
-        const verifyUrl = `${baseUrl}/auth/email/${encodeURIComponent(email)}/${otp}`;
-        const transport = getTransport();
-        const from = process.env.EMAIL_FROM;
-        if (!transport || !from) {
-          console.log(`[auth] otp for ${to}: ${otp} (${verifyUrl})`);
-          return;
-        }
-        await transport.sendMail({
-          from,
-          to,
-          subject: "Log in to Turf Tools",
-          html: `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #333;">
+    // Email magic-link OTP unless AUTH_OTP_DISABLED=1.
+    ...(isEmailOtpEnabled()
+      ? [
+          emailOTP({
+            disableSignUp: true,
+            expiresIn: 60 * 60,
+            // 8 digits rather than the 6-digit default — no human types it (it
+            // only rides in the verify-link URL), so the extra brute-force
+            // margin is free.
+            otpLength: 8,
+            // The OTP rides only in the verify-page URL; that page verifies via
+            // a client POST (never a GET), so scanners that pre-fetch the link
+            // can't burn it. Deployments behind JS-executing scanners set
+            // AUTH_REQUIRE_LINK_CONFIRMATION so the verify fires on a click
+            // rather than on mount — see routes/auth.email.$email.$code.tsx.
+            sendVerificationOTP: async ({ email, otp, type }) => {
+              // We only use the sign-in flow; other types (email-verification,
+              // forget-password, change-email) aren't wired up.
+              if (type !== "sign-in") return;
+              // The before-hook has already canonicalised `email` and confirmed
+              // an active membership exists. This lookup is just to grab the
+              // displayEmail for the outbound `to`.
+              const row = (
+                await db
+                  .select({ displayEmail: users.displayEmail })
+                  .from(users)
+                  .where(eq(users.email, email))
+                  .limit(1)
+              )[0];
+              if (!row) {
+                // Unreachable per the before-hook guarantee. Log loudly if it fires.
+                console.error(`[auth] sendVerificationOTP: no user row for ${email}`);
+                return;
+              }
+              const to = row.displayEmail;
+              const baseUrl = process.env.BETTER_AUTH_URL ?? "http://localhost:3000";
+              const verifyUrl = `${baseUrl}/auth/email/${encodeURIComponent(email)}/${otp}`;
+              const transport = getTransport();
+              const from = process.env.EMAIL_FROM;
+              if (!transport || !from) {
+                console.log(`[auth] otp for ${to}: ${otp} (${verifyUrl})`);
+                return;
+              }
+              await transport.sendMail({
+                from,
+                to,
+                subject: "Log in to Turf Tools",
+                html: `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: #333;">
   <br/>
   <h2 style="font-weight: 600;">Welcome to <i>Turf Tools</i></h2>
   <p style="font-size: 16px;">Click the button below to log in securely:</p>
@@ -195,9 +200,29 @@ export const auth = betterAuth({
 
   <p style="font-size: 16px; color: #888;">This link will expire in 1 hour.</p>
 </div>`,
-        });
-      },
-    }),
+              });
+            },
+          }),
+        ]
+      : []),
+    // Keycloak OIDC when KEYCLOAK_ISSUER / CLIENT_ID / CLIENT_SECRET are set.
+    // disableSignUp keeps sign-in invite-only: the email must already exist
+    // in users (+ an active membership), same as email OTP.
+    ...(isKeycloakEnabled()
+      ? [
+          genericOAuth({
+            config: [
+              keycloak({
+                issuer: process.env.KEYCLOAK_ISSUER!,
+                clientId: process.env.KEYCLOAK_CLIENT_ID!,
+                clientSecret: process.env.KEYCLOAK_CLIENT_SECRET!,
+                scopes: ["openid", "profile", "email"],
+                disableSignUp: true,
+              }),
+            ],
+          }),
+        ]
+      : []),
     // Writes cookies from programmatic auth.api.* calls (notably the sliding
     // session renewal in getSession) onto the response via TanStack Start's
     // setCookie; no-ops outside a request context. Must stay the last plugin.

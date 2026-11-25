@@ -3,9 +3,18 @@ import { and, asc, eq, isNull, sql, type Db } from "@turf-tools/db";
 import { memberships, users } from "@turf-tools/db/schema";
 import { z } from "zod";
 import { auth } from "~/lib/auth";
+import { isEmailOtpEnabled } from "~/lib/auth-env";
 import { normalizeEmail } from "~/lib/normalize-email";
 import { canManage, ROLE_NAMES } from "~/lib/permissions";
 import { memberMut, webMut, webPub } from "../context";
+
+function requireEmailOtp() {
+  if (!isEmailOtpEnabled()) {
+    throw new ORPCError("BAD_REQUEST", {
+      message: "Email login links are disabled (AUTH_OTP_DISABLED=1).",
+    });
+  }
+}
 
 const roleSchema = z.enum(ROLE_NAMES);
 const pub = webPub("users.manage");
@@ -119,6 +128,7 @@ export const invite = mut
     });
 
     if (input.sendEmail) {
+      requireEmailOtp();
       await auth.api.sendVerificationOTP({
         body: { email: displayEmail, type: "sign-in" },
         headers: new Headers(),
@@ -252,6 +262,7 @@ export const resendInvite = mut
     )[0];
     if (!row) throw new ORPCError("NOT_FOUND");
     checkCanManage(context, row.role);
+    requireEmailOtp();
 
     await auth.api.sendVerificationOTP({
       body: { email: row.displayEmail, type: "sign-in" },

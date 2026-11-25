@@ -7,6 +7,7 @@ import { Input } from "~/components/input";
 import { LightDarkToggle } from "~/components/light-dark-toggle";
 import { LoadingIndicator } from "~/components/loading-indicator";
 import { authClient } from "~/lib/auth-client";
+import { getEmailOtpEnabled, getKeycloakEnabled } from "~/lib/server/auth-flags";
 
 export const Route = createFileRoute("/login")({
   // Reads the session from root context — never its own getSession call.
@@ -15,10 +16,14 @@ export const Route = createFileRoute("/login")({
   beforeLoad: ({ context }) => {
     if (context.session) throw redirect({ to: "/" });
   },
+  loader: async () => ({
+    emailOtpEnabled: await getEmailOtpEnabled(),
+    keycloakEnabled: await getKeycloakEnabled(),
+  }),
   component: LoginPage,
 });
 
-// Two-state flow:
+// Two-state flow (email OTP only):
 //   email – user types their email and submits
 //   sent  – we sent the login link; user clicks through from their inbox.
 // Verification happens entirely on the verify page (the email link); there's
@@ -26,6 +31,7 @@ export const Route = createFileRoute("/login")({
 type Step = "email" | "sent";
 
 function LoginPage() {
+  const { emailOtpEnabled, keycloakEnabled } = Route.useLoaderData();
   const [step, setStep] = useState<Step>("email");
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +59,17 @@ function LoginPage() {
     },
   });
 
+  const signInKeycloak = useMutation({
+    mutationFn: async () => {
+      const res = await authClient.signIn.social({
+        provider: "keycloak",
+        callbackURL: "/",
+      });
+      if (res.error) throw new Error(res.error.message ?? "SSO login failed");
+      return res;
+    },
+  });
+
   const onSubmitEmail = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -63,6 +80,15 @@ function LoginPage() {
       return;
     }
     setStep("sent");
+  };
+
+  const onKeycloak = async () => {
+    setError(null);
+    try {
+      await signInKeycloak.mutateAsync();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "SSO login failed");
+    }
   };
 
   // "Back to login" — full reset.
@@ -95,6 +121,10 @@ function LoginPage() {
             pending={sendCode.isPending}
             onSubmit={onSubmitEmail}
             error={error}
+            emailOtpEnabled={emailOtpEnabled}
+            keycloakEnabled={keycloakEnabled}
+            keycloakPending={signInKeycloak.isPending}
+            onKeycloak={onKeycloak}
           />
         ) : (
           <SentStep email={email} onBack={reset} />
@@ -110,36 +140,79 @@ function EmailStep({
   pending,
   onSubmit,
   error,
+  emailOtpEnabled,
+  keycloakEnabled,
+  keycloakPending,
+  onKeycloak,
 }: {
   email: string;
   setEmail: (v: string) => void;
   pending: boolean;
   onSubmit: (e: FormEvent) => void;
   error: string | null;
+  emailOtpEnabled: boolean;
+  keycloakEnabled: boolean;
+  keycloakPending: boolean;
+  onKeycloak: () => void;
 }) {
+  const busy = pending || keycloakPending;
+  const showDivider = emailOtpEnabled && keycloakEnabled;
+
+  if (!emailOtpEnabled && !keycloakEnabled) {
+    return (
+      <Callout tone="error">
+        No sign-in methods are configured. Enable email OTP or Keycloak SSO.
+      </Callout>
+    );
+  }
+
   return (
     <>
-      <p className="mb-8 text-center text-[16px] text-muted-foreground">
-        Enter your email to receive a login link
-      </p>
-      <form onSubmit={onSubmit} className="flex flex-col gap-3">
-        <Input
-          type="email"
-          placeholder="you@example.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          required
-          autoFocus
-          className="h-11 md:h-9 text-[16px]"
-        />
+      {emailOtpEnabled ? (
+        <>
+          <p className="mb-8 text-center text-[16px] text-muted-foreground">
+            Enter your email to receive a login link
+          </p>
+          <form onSubmit={onSubmit} className="flex flex-col gap-3">
+            <Input
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              autoFocus
+              className="h-11 md:h-9 text-[16px]"
+            />
+            <Button
+              type="submit"
+              className="h-12 md:h-10 disabled:opacity-100 text-[16px]"
+              disabled={busy}
+            >
+              {pending ? "Sending…" : "Send login link"}
+            </Button>
+          </form>
+        </>
+      ) : (
+        <p className="mb-8 text-center text-[16px] text-muted-foreground">Sign in to continue</p>
+      )}
+      {showDivider ? (
+        <div className="my-4 flex items-center gap-3 text-[13px] text-muted-foreground">
+          <div className="h-px flex-1 bg-border" />
+          or
+          <div className="h-px flex-1 bg-border" />
+        </div>
+      ) : null}
+      {keycloakEnabled ? (
         <Button
-          type="submit"
-          className="h-12 md:h-10 disabled:opacity-100 text-[16px]"
-          disabled={pending}
+          type="button"
+          variant={emailOtpEnabled ? "outline" : "default"}
+          className="h-12 md:h-10 w-full disabled:opacity-100 text-[16px]"
+          disabled={busy}
+          onClick={onKeycloak}
         >
-          {pending ? "Sending…" : "Send login link"}
+          {keycloakPending ? "Redirecting…" : "Sign in with SSO"}
         </Button>
-      </form>
+      ) : null}
       {error ? (
         <Callout tone="error" className="mt-4">
           {error}

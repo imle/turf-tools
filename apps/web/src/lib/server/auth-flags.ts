@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { isEmailOtpEnabled, isKeycloakEnabled } from "~/lib/auth-env";
 
 // Per-deployment auth toggles, read from server env (never bundled to the
 // client). `AUTH_REQUIRE_LINK_CONFIRMATION` makes the magic-link verify page
@@ -9,4 +10,13 @@ import { createServerFn } from "@tanstack/react-start";
 // such gateways flip it on, trading one click for scanner resistance.
 export const getRequireLinkConfirmation = createServerFn({ method: "GET" }).handler(
   async (): Promise<boolean> => process.env.AUTH_REQUIRE_LINK_CONFIRMATION === "1",
+);
+
+// Login-page flags for which sign-in methods to show (no secrets shipped).
+export const getKeycloakEnabled = createServerFn({ method: "GET" }).handler(
+  async (): Promise<boolean> => isKeycloakEnabled(),
+);
+
+export const getEmailOtpEnabled = createServerFn({ method: "GET" }).handler(
+  async (): Promise<boolean> => isEmailOtpEnabled(),
 );
